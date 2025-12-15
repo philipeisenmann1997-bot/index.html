@@ -91,17 +91,26 @@ async function stopRecord(){
 
 async function onStop(){
   const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/mp4' });
+  const sizeKb = Math.round(blob.size/1024);
+  log(`Audio fertig: ${sizeKb} KB`);
   chunks = [];
-  // für iOS: mp4 Endung
   const fname = (recorder.mimeType || '').includes('mp4') ? 'speech.m4a' : 'speech.webm';
-
   const fd = new FormData();
-  fd.append('audio', blob, fname);         // <-- n8n Webhook: binary „audio“
-  fd.append('reply_mode', 'http');         // optional: Meta
+  fd.append('audio', blob, fname);
+
   try {
     const res = await fetch(WEBHOOK, { method:'POST', body: fd });
-    if(!res.ok) throw new Error(await res.text());
+    log(`Upload Status: ${res.status}`);
     const data = await res.json().catch(()=> ({}));
+    const text = data.output || data.text || "";
+    el.answer.textContent = text || "–";
+    setRecLabel("bereit – tippen & halten zum Sprechen");
+  } catch(err){
+    log("Fehler beim Senden: " + err.message);
+    setRecLabel("Fehler – erneut versuchen");
+  }
+}
+
 
     // Erwartet: { output: "Text …", ttsUrl?: "https://…/audio.mp3" }
     const text = data.output || data.text || "";
