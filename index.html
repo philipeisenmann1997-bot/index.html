@@ -30,14 +30,6 @@
     #ptt[disabled]{ filter:grayscale(.6); opacity:.65; cursor:not-allowed }
     .bubble{ background:#0f1720; border:1px solid #1d2a37; border-radius:14px; padding:12px 14px; margin-top:10px }
     .log{ font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.86rem; color:#a9bcd0; white-space:pre-wrap }
-    .inputRow{ display:flex; gap:8px; margin-top:10px }
-    .inputRow input{
-      flex:1; background:#0f1720; border:1px solid #1d2a37; color:#dbe7f3;
-      border-radius:12px; padding:12px 14px; font-size:1rem
-    }
-    .inputRow button{
-      padding:12px 16px; border-radius:12px; border:1px solid #1d2a37; background:#2a845f; color:#eafff6; font-weight:700
-    }
   </style>
 </head>
 <body>
@@ -50,14 +42,7 @@
         <span class="small" id="recLbl">bereit – tippen &amp; halten zum Sprechen</span>
       </div>
 
-      <!-- Button: nimmt Audio auf (Server-Transkription) -->
       <button id="ptt" type="button">Zum Sprechen tippen &amp; halten</button>
-
-      <!-- Fallback-Textfeld -->
-      <div id="fallbackBox" class="inputRow" style="display:none">
-        <input id="fallbackInput" type="text" placeholder="Text eingeben und senden …" />
-        <button id="fallbackSend" type="button">Senden</button>
-      </div>
 
       <div class="bubble">
         <div class="small"><b>Gesagt:</b> <span id="said">–</span></div>
@@ -68,20 +53,13 @@
         <div class="log" id="log">Bereit.</div>
       </div>
 
-      <!-- Audioausgabe (serverseitiges TTS) -->
       <audio id="player" playsinline preload="none" crossorigin="anonymous"></audio>
     </div>
   </div>
 
 <script>
-/* ------------------- Konfiguration ------------------- */
 const WEBHOOK = "https://n8n.srv1112525.hstgr.cloud/webhook/adbfc875-ecdc-433b-85f9-aba25b8beaa5";
 
-/* Wenn du später wieder lokale Spracherkennung erzwingen willst:
-   auf true setzen (sofern im Browser verfügbar) */
-const PREFER_LOCAL_SR = false;
-
-/* ------------------- DOM Refs ------------------------ */
 const el = {
   ptt: document.getElementById('ptt'),
   recLbl: document.getElementById('recLbl'),
@@ -89,19 +67,16 @@ const el = {
   answer: document.getElementById('answer'),
   log: document.getElementById('log'),
   audio: document.getElementById('player'),
-  fallbackBox: document.getElementById('fallbackBox'),
-  fallbackInput: document.getElementById('fallbackInput'),
-  fallbackSend: document.getElementById('fallbackSend'),
 };
 
 function log(t){ el.log.textContent = t; }
 function setRecLabel(t){ el.recLbl.textContent = t; }
 
-/* ------------------- iOS Audio „primen“ -------------- */
-async function primeAudio() {
+/* ---------- iOS Audio/Voices „primen“ ---------- */
+async function primeAudio(){
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (Ctx) {
+    if (Ctx){
       const ctx = new Ctx();
       if (ctx.state === 'suspended') await ctx.resume();
       const b = ctx.createBuffer(1,1,22050);
@@ -113,29 +88,16 @@ async function primeAudio() {
   } catch(_) {}
 }
 
-/* ------------------- Fallback-Texteingabe ------------- */
-el.fallbackSend?.addEventListener('click', async () => {
-  const t = el.fallbackInput.value.trim();
-  if (!t) return;
-  el.fallbackInput.value = "";
-  el.said.textContent = t;
-  await sendTextToN8n(t);
-});
-el.fallbackInput?.addEventListener('keydown', e => {
-  if (e.key === 'Enter') el.fallbackSend.click();
-});
-
-/* ------------------- TTS (Browser) ------------------- */
+/* ---------- Browser-TTS als Fallback ---------- */
 function speak(txt){
   try { window.speechSynthesis.cancel(); } catch(_){}
   const u = new SpeechSynthesisUtterance();
-  // „Bud“-Style
-  u.rate = 0.82; u.pitch = 0.6; u.volume = 1.0;
+  u.rate = 0.82; u.pitch = 0.6; u.volume = 1.0; // „Bud“-Style
+  const clean = (s) => (s||"").replace(/[^\w äöüÄÖÜß]/g," ").replace(/\s+/g," ").trim();
   const pick = () => {
     const vs = speechSynthesis.getVoices();
     return vs.find(v => /de|german|deu/i.test(v.lang)) || vs[0];
   };
-  const clean = (s) => (s||"").replace(/[^\w äöüÄÖÜß]/g," ").replace(/\s+/g," ").trim();
   const trySpeak = () => {
     const v = pick(); if (!v) return false;
     u.voice = v; u.text = clean(txt); speechSynthesis.speak(u); return true;
@@ -143,83 +105,11 @@ function speak(txt){
   if (!trySpeak()) speechSynthesis.onvoiceschanged = () => trySpeak();
 }
 
-/* ------------------- Senden an n8n ------------------- */
-async function sendTextToN8n(text){
-  setRecLabel("sende …");
-  try {
-    const res = await fetch(WEBHOOK, {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({ text, input:{ text }, source:'voice-web' })
-    });
-    await handleServerResponse(res);
-  } catch(err){
-    log("Fehler beim Senden: " + err.message);
-    setRecLabel("Fehler – erneut versuchen");
-  }
-}
-
-/* ------------------- Antwort verarbeiten ------------- */
-async function handleServerResponse(res){
-  log(`Serverstatus: ${res.status}`);
-  const data = await res.json().catch(()=> ({}));
-
-  // Texte robust rausziehen (egal wie das JSON heißt)
-  const saidTxt =
-    data.asr || data.asrText || data.input?.text || data.text || "";
-  const replyTxt =
-    data.reply || data.output || data.answer || data.textOut || "";
-
-  if (saidTxt) el.said.textContent = saidTxt;
-  if (replyTxt) el.answer.textContent = replyTxt || "–";
-
-  // Audio-URL flexibel lesen
-  const ttsUrl = data.ttsUrl || data.tts || data.audioUrl || "";
-  setRecLabel("bereit – tippen & halten zum Sprechen");
-
-  if (ttsUrl) {
-    try {
-      await primeAudio();
-      el.audio.src = ttsUrl;
-      el.audio.currentTime = 0;
-      // play() kann auf iOS blockieren – deshalb loggen & zur Not Browser-TTS
-      await el.audio.play().catch(err => { throw err; });
-    } catch(e){
-      log("Audio-Play blockiert: " + e.message + " – nutze Browser-TTS");
-      if (replyTxt) speak(replyTxt);
-    }
-  } else if (replyTxt) {
-    speak(replyTxt);
-  }
-}
-
-/* ------------------- Lokale SR (optional) ------------- */
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognition = null, srActive = false;
-if (SR && PREFER_LOCAL_SR) {
-  recognition = new SR();
-  recognition.lang = "de-DE";
-  recognition.interimResults = false;
-  recognition.continuous = false;
-
-  recognition.onresult = (ev) => {
-    const text = (ev.results?.[0]?.[0]?.transcript || "").trim();
-    if (!text) { log("Nichts erkannt."); return; }
-    el.said.textContent = text;
-    sendTextToN8n(text);
-  };
-  recognition.onerror = (ev) => { log("SR Fehler: "+ev.error); srActive=false; };
-  recognition.onend = () => { srActive=false; };
-} else {
-  // Wenn keine lokale SR benutzt wird, zeige das Text-Fallback zusätzlich an
-  el.fallbackBox.style.display = "flex";
-}
-
-/* ------------------- Audio-Aufnahme (Server-ASR) ------ */
-let media = null, recorder = null, chunks = [], isRecording = false;
+/* ---------- Aufnahme (Server-ASR) ---------- */
+let media=null, recorder=null, chunks=[], isRecording=false;
 
 function pickMime(){
-  const list = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'];
+  const list=['audio/mp4','audio/webm;codecs=opus','audio/webm'];
   return list.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || 'audio/webm';
 }
 
@@ -228,26 +118,22 @@ async function startRecord(){
   isRecording = true;
   await primeAudio();
   const constraints = {
-    audio:{
-      channelCount:1, noiseSuppression:true, echoCancellation:true, sampleRate:48000
-    }
+    audio:{ channelCount:1, noiseSuppression:true, echoCancellation:true, sampleRate:48000 }
   };
   log("Frage Mikrofon an …");
   try{
     media = await navigator.mediaDevices.getUserMedia(constraints);
-  } catch(err){
+  }catch(err){
     isRecording=false; log("Mikro verweigert: "+err.name+" – "+err.message);
     return;
   }
 
   const mime = pickMime();
-  try{
-    recorder = new MediaRecorder(media, { mimeType:mime });
-  }catch(err){
-    recorder = new MediaRecorder(media);
-  }
+  try { recorder = new MediaRecorder(media, {mimeType:mime}); }
+  catch(_){ recorder = new MediaRecorder(media); }
+
   chunks = [];
-  recorder.ondataavailable = (e)=> e.data?.size && chunks.push(e.data);
+  recorder.ondataavailable = e => e.data?.size && chunks.push(e.data);
   recorder.onstop = onStop;
   recorder.start();
 
@@ -259,13 +145,13 @@ async function stopRecord(){
   if (!isRecording) return;
   isRecording=false;
   try{ recorder && recorder.state!=='inactive' && recorder.stop(); }catch(_){}
-  try{ media && media.getTracks().forEach(t => t.stop()); }catch(_){}
+  try{ media && media.getTracks().forEach(t=>t.stop()); }catch(_){}
   setRecLabel("sende Audio …");
 }
 
 async function onStop(){
   const mime = recorder?.mimeType || pickMime();
-  const blob = new Blob(chunks, { type:mime });
+  const blob = new Blob(chunks, {type:mime});
   chunks = [];
   if (!blob.size){ log("Keine Aufnahme."); setRecLabel("bereit – tippen & halten zum Sprechen"); return; }
 
@@ -273,42 +159,93 @@ async function onStop(){
   const fd = new FormData();
   fd.append('audio', blob, fname);
 
-  try{
+  try {
     const res = await fetch(WEBHOOK, { method:'POST', body:fd });
     await handleServerResponse(res);
-  }catch(err){
+  } catch(err){
     log("Fehler Upload: " + err.message);
     setRecLabel("Fehler – erneut versuchen");
   }
 }
 
-/* ------------------- Button-Verhalten ----------------- */
-el.ptt.addEventListener('pointerdown', async () => {
-  // Wenn lokale SR explizit gewünscht & vorhanden
-  if (recognition && PREFER_LOCAL_SR){
-    if (srActive) return;
-    srActive = true;
-    await primeAudio();
-    try { recognition.start(); setRecLabel("Erkennung läuft … gedrückt halten"); }
-    catch(_) {}
+/* ---------- Response verarbeiten ---------- */
+async function handleServerResponse(res){
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+
+  // 1) Roh-Audio (falls du es doch so zurückschickst)
+  if (ct.startsWith('audio/') || ct === 'application/octet-stream'){
+    const blob = await res.blob();
+    await playBlob(blob);
+    setRecLabel("bereit – tippen & halten zum Sprechen");
     return;
   }
-  // Sonst: Server-ASR über Audio
+
+  // 2) JSON
+  let data = {};
+  try { data = await res.json(); }
+  catch(_){ log("Konnte JSON nicht lesen (content-type="+ct+")"); }
+
+  const saidTxt =
+    data.asrText || data.asr || data['input.text'] || data.text || '';
+  const replyTxt =
+    data.reply || data.output || data.answer || data.textOut || '';
+
+  if (saidTxt) el.said.textContent = saidTxt;
+  if (replyTxt) el.answer.textContent = replyTxt || "–";
+
+  const url = data.ttsUrl || data.audioUrl || '';
+  const b64 = data.ttsBase64 || '';
+  const mime = data.ttsMime || 'audio/mpeg';
+
+  try {
+    await primeAudio();
+
+    if (url){
+      el.audio.src = url; el.audio.currentTime=0;
+      await el.audio.play().catch(err => { throw err; });
+    } else if (b64){
+      const blob = base64ToBlob(b64, mime);
+      await playBlob(blob);
+    } else if (replyTxt){
+      // kein Audio vorhanden -> Browser-TTS
+      speak(replyTxt);
+    }
+  } catch(e){
+    log("Audio-Play blockiert: " + e.message + " – nutze Browser-TTS");
+    if (replyTxt) speak(replyTxt);
+  }
+
+  setRecLabel("bereit – tippen & halten zum Sprechen");
+}
+
+/* ---------- Utils ---------- */
+function base64ToBlob(b64, mime='application/octet-stream'){
+  const clean = b64.replace(/^data:[^,]+,/, '').replace(/\s/g,'');
+  const bin = atob(clean);
+  const len = bin.length;
+  const buf = new Uint8Array(len);
+  for (let i=0;i<len;i++) buf[i] = bin.charCodeAt(i);
+  return new Blob([buf], {type:mime});
+}
+
+async function playBlob(blob){
+  const url = URL.createObjectURL(blob);
+  el.audio.src = url; el.audio.currentTime = 0;
+  try{ await el.audio.play(); } finally {
+    // URL freigeben, aber erst etwas später
+    setTimeout(()=>URL.revokeObjectURL(url), 8000);
+  }
+}
+
+/* ---------- Button-Handling ---------- */
+el.ptt.addEventListener('pointerdown', async () => {
   await startRecord();
 }, {passive:true});
-
 ['pointerup','pointercancel','pointerleave'].forEach(ev =>
-  el.ptt.addEventListener(ev, async () => {
-    if (recognition && PREFER_LOCAL_SR){
-      if (!srActive) return;
-      try { recognition.stop(); } catch(_){}
-      return;
-    }
-    await stopRecord();
-  }, {passive:true})
+  el.ptt.addEventListener(ev, async () => { await stopRecord(); }, {passive:true})
 );
 
-/* ------------------- Seiten-Interaktion „primen“ ----- */
+/* ---------- Interaktion „primen“ ---------- */
 ['pointerdown','click','touchstart','touchend'].forEach(type=>{
   document.addEventListener(type, ()=> {
     primeAudio();
