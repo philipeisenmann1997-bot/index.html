@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Push-to-Talk (Text only)</title>
+  <title>Push-to-Talk</title>
   <style>
     :root { --bg:#0b0f14; --muted:#8aa0b2; --accent:#34c759; --danger:#ff453a; }
     * { box-sizing:border-box }
@@ -50,10 +50,10 @@
         <span class="small" id="recLbl">bereit – tippen &amp; halten zum Sprechen</span>
       </div>
 
-      <!-- Button triggert NUR Web Speech (wenn verfügbar) -->
+      <!-- Button: nimmt Audio auf (Server-Transkription) -->
       <button id="ptt" type="button">Zum Sprechen tippen &amp; halten</button>
 
-      <!-- Fallback-Textfeld (wenn keine SpeechRecognition vorhanden) -->
+      <!-- Fallback-Textfeld -->
       <div id="fallbackBox" class="inputRow" style="display:none">
         <input id="fallbackInput" type="text" placeholder="Text eingeben und senden …" />
         <button id="fallbackSend" type="button">Senden</button>
@@ -68,13 +68,18 @@
         <div class="log" id="log">Bereit.</div>
       </div>
 
-      <audio id="player" playsinline preload="none"></audio>
+      <!-- Audioausgabe (serverseitiges TTS) -->
+      <audio id="player" playsinline preload="none" crossorigin="anonymous"></audio>
     </div>
   </div>
 
 <script>
 /* ------------------- Konfiguration ------------------- */
 const WEBHOOK = "https://n8n.srv1112525.hstgr.cloud/webhook/adbfc875-ecdc-433b-85f9-aba25b8beaa5";
+
+/* Wenn du später wieder lokale Spracherkennung erzwingen willst:
+   auf true setzen (sofern im Browser verfügbar) */
+const PREFER_LOCAL_SR = false;
 
 /* ------------------- DOM Refs ------------------------ */
 const el = {
@@ -92,114 +97,223 @@ const el = {
 function log(t){ el.log.textContent = t; }
 function setRecLabel(t){ el.recLbl.textContent = t; }
 
-/* ------------------- Speech Setup -------------------- */
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognition = null;
-let isRecording = false;
-
-if (SR) {
-  recognition = new SR();
-  recognition.lang = "de-DE";
-  recognition.interimResults = false;
-  recognition.continuous = false;
-
-  recognition.onresult = async (ev) => {
-    const text = (ev.results?.[0]?.[0]?.transcript || "").trim();
-    if (!text) { log("Nichts erkannt."); setRecLabel("bereit – tippen & halten zum Sprechen"); return; }
-    el.said.textContent = text;
-    await sendTextToN8n(text);
-  };
-  recognition.onerror = (ev) => {
-    log("Erkennungsfehler: " + ev.error);
-    isRecording = false;
-    setRecLabel("bereit – tippen & halten zum Sprechen");
-  };
-  recognition.onend = () => {
-    isRecording = false;
-    setRecLabel("bereit – tippen & halten zum Sprechen");
-  };
-} else {
-  // Kein SpeechRecognition: Fallback zeigen
-  el.fallbackBox.style.display = "flex";
-  log("Hinweis: Dieser Browser bietet keine Spracherkennung. Nutze die Texteingabe.");
-}
-
-/* ------------------- Nur TEXT an n8n ----------------- */
-async function sendTextToN8n(text){
-  setRecLabel("sende …");
-  log("Sende Text an n8n …");
+/* ------------------- iOS Audio „primen“ -------------- */
+async function primeAudio() {
   try {
-    const res = await fetch(WEBHOOK, {
-      method: 'POST',
-      headers: { 'Content-Type':'application/json' },
-      body: JSON.stringify({
-        text,
-        input: { text },     // zweiter Pfad, falls dein Normalize-Input darauf hört
-        source: 'voice-web'
-      })
-    });
-    const data = await res.json().catch(()=> ({}));
-    const reply = (data.output || data.text || "").toString();
-    el.answer.textContent = reply || "–";
-    setRecLabel("bereit – tippen & halten zum Sprechen");
-    log(`Antwort erhalten (${res.status})`);
-
-    // Optional serverseitiges TTS-File
-    if (data.ttsUrl) {
-      el.audio.src = data.ttsUrl;
-      try { await el.audio.play(); } catch(_) {}
-    } else if (reply) {
-      speak(reply);
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) {
+      const ctx = new Ctx();
+      if (ctx.state === 'suspended') await ctx.resume();
+      const b = ctx.createBuffer(1,1,22050);
+      const s = ctx.createBufferSource(); s.buffer = b;
+      s.connect(ctx.destination); s.start(0);
+      setTimeout(()=>ctx.close(),120);
     }
-  } catch(err){
-    log("Fehler beim Senden: " + err.message);
-    setRecLabel("Fehler – erneut versuchen");
-  }
+    if (window.speechSynthesis?.paused) window.speechSynthesis.resume();
+  } catch(_) {}
 }
 
-/* ------------------- TTS im Browser ------------------ */
+/* ------------------- Fallback-Texteingabe ------------- */
+el.fallbackSend?.addEventListener('click', async () => {
+  const t = el.fallbackInput.value.trim();
+  if (!t) return;
+  el.fallbackInput.value = "";
+  el.said.textContent = t;
+  await sendTextToN8n(t);
+});
+el.fallbackInput?.addEventListener('keydown', e => {
+  if (e.key === 'Enter') el.fallbackSend.click();
+});
+
+/* ------------------- TTS (Browser) ------------------- */
 function speak(txt){
   try { window.speechSynthesis.cancel(); } catch(_){}
   const u = new SpeechSynthesisUtterance();
-  u.rate = 0.82; u.pitch = 0.6; u.volume = 1.0; // „Bud“-Style
+  // „Bud“-Style
+  u.rate = 0.82; u.pitch = 0.6; u.volume = 1.0;
   const pick = () => {
     const vs = speechSynthesis.getVoices();
     return vs.find(v => /de|german|deu/i.test(v.lang)) || vs[0];
   };
   const clean = (s) => (s||"").replace(/[^\w äöüÄÖÜß]/g," ").replace(/\s+/g," ").trim();
   const trySpeak = () => {
-    const v = pick();
-    if (!v) return false;
-    u.voice = v; u.text = clean(txt);
-    speechSynthesis.speak(u); return true;
+    const v = pick(); if (!v) return false;
+    u.voice = v; u.text = clean(txt); speechSynthesis.speak(u); return true;
   };
   if (!trySpeak()) speechSynthesis.onvoiceschanged = () => trySpeak();
 }
 
-/* ------------- Button-Logik: nur SR starten ---------- */
-el.ptt.addEventListener('pointerdown', () => {
-  if (!recognition || isRecording) return;
+/* ------------------- Senden an n8n ------------------- */
+async function sendTextToN8n(text){
+  setRecLabel("sende …");
+  try {
+    const res = await fetch(WEBHOOK, {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ text, input:{ text }, source:'voice-web' })
+    });
+    await handleServerResponse(res);
+  } catch(err){
+    log("Fehler beim Senden: " + err.message);
+    setRecLabel("Fehler – erneut versuchen");
+  }
+}
+
+/* ------------------- Antwort verarbeiten ------------- */
+async function handleServerResponse(res){
+  log(`Serverstatus: ${res.status}`);
+  const data = await res.json().catch(()=> ({}));
+
+  // Texte robust rausziehen (egal wie das JSON heißt)
+  const saidTxt =
+    data.asr || data.asrText || data.input?.text || data.text || "";
+  const replyTxt =
+    data.reply || data.output || data.answer || data.textOut || "";
+
+  if (saidTxt) el.said.textContent = saidTxt;
+  if (replyTxt) el.answer.textContent = replyTxt || "–";
+
+  // Audio-URL flexibel lesen
+  const ttsUrl = data.ttsUrl || data.tts || data.audioUrl || "";
+  setRecLabel("bereit – tippen & halten zum Sprechen");
+
+  if (ttsUrl) {
+    try {
+      await primeAudio();
+      el.audio.src = ttsUrl;
+      el.audio.currentTime = 0;
+      // play() kann auf iOS blockieren – deshalb loggen & zur Not Browser-TTS
+      await el.audio.play().catch(err => { throw err; });
+    } catch(e){
+      log("Audio-Play blockiert: " + e.message + " – nutze Browser-TTS");
+      if (replyTxt) speak(replyTxt);
+    }
+  } else if (replyTxt) {
+    speak(replyTxt);
+  }
+}
+
+/* ------------------- Lokale SR (optional) ------------- */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null, srActive = false;
+if (SR && PREFER_LOCAL_SR) {
+  recognition = new SR();
+  recognition.lang = "de-DE";
+  recognition.interimResults = false;
+  recognition.continuous = false;
+
+  recognition.onresult = (ev) => {
+    const text = (ev.results?.[0]?.[0]?.transcript || "").trim();
+    if (!text) { log("Nichts erkannt."); return; }
+    el.said.textContent = text;
+    sendTextToN8n(text);
+  };
+  recognition.onerror = (ev) => { log("SR Fehler: "+ev.error); srActive=false; };
+  recognition.onend = () => { srActive=false; };
+} else {
+  // Wenn keine lokale SR benutzt wird, zeige das Text-Fallback zusätzlich an
+  el.fallbackBox.style.display = "flex";
+}
+
+/* ------------------- Audio-Aufnahme (Server-ASR) ------ */
+let media = null, recorder = null, chunks = [], isRecording = false;
+
+function pickMime(){
+  const list = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'];
+  return list.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || 'audio/webm';
+}
+
+async function startRecord(){
+  if (isRecording) return;
   isRecording = true;
+  await primeAudio();
+  const constraints = {
+    audio:{
+      channelCount:1, noiseSuppression:true, echoCancellation:true, sampleRate:48000
+    }
+  };
+  log("Frage Mikrofon an …");
+  try{
+    media = await navigator.mediaDevices.getUserMedia(constraints);
+  } catch(err){
+    isRecording=false; log("Mikro verweigert: "+err.name+" – "+err.message);
+    return;
+  }
+
+  const mime = pickMime();
+  try{
+    recorder = new MediaRecorder(media, { mimeType:mime });
+  }catch(err){
+    recorder = new MediaRecorder(media);
+  }
+  chunks = [];
+  recorder.ondataavailable = (e)=> e.data?.size && chunks.push(e.data);
+  recorder.onstop = onStop;
+  recorder.start();
+
   setRecLabel("Erkennung läuft … gedrückt halten");
-  try { recognition.start(); } catch(_){}
-});
+  log("Aufnahme gestartet (" + (recorder?.mimeType || mime) + ")");
+}
+
+async function stopRecord(){
+  if (!isRecording) return;
+  isRecording=false;
+  try{ recorder && recorder.state!=='inactive' && recorder.stop(); }catch(_){}
+  try{ media && media.getTracks().forEach(t => t.stop()); }catch(_){}
+  setRecLabel("sende Audio …");
+}
+
+async function onStop(){
+  const mime = recorder?.mimeType || pickMime();
+  const blob = new Blob(chunks, { type:mime });
+  chunks = [];
+  if (!blob.size){ log("Keine Aufnahme."); setRecLabel("bereit – tippen & halten zum Sprechen"); return; }
+
+  const fname = (mime.includes('mp4') || mime.includes('m4a')) ? 'speech.m4a' : 'speech.webm';
+  const fd = new FormData();
+  fd.append('audio', blob, fname);
+
+  try{
+    const res = await fetch(WEBHOOK, { method:'POST', body:fd });
+    await handleServerResponse(res);
+  }catch(err){
+    log("Fehler Upload: " + err.message);
+    setRecLabel("Fehler – erneut versuchen");
+  }
+}
+
+/* ------------------- Button-Verhalten ----------------- */
+el.ptt.addEventListener('pointerdown', async () => {
+  // Wenn lokale SR explizit gewünscht & vorhanden
+  if (recognition && PREFER_LOCAL_SR){
+    if (srActive) return;
+    srActive = true;
+    await primeAudio();
+    try { recognition.start(); setRecLabel("Erkennung läuft … gedrückt halten"); }
+    catch(_) {}
+    return;
+  }
+  // Sonst: Server-ASR über Audio
+  await startRecord();
+}, {passive:true});
+
 ['pointerup','pointercancel','pointerleave'].forEach(ev =>
-  el.ptt.addEventListener(ev, () => {
-    if (!recognition || !isRecording) return;
-    try { recognition.stop(); } catch(_){}
+  el.ptt.addEventListener(ev, async () => {
+    if (recognition && PREFER_LOCAL_SR){
+      if (!srActive) return;
+      try { recognition.stop(); } catch(_){}
+      return;
+    }
+    await stopRecord();
   }, {passive:true})
 );
 
-/* ----------------- Fallback-Senden ------------------- */
-el.fallbackSend.addEventListener('click', async () => {
-  const t = el.fallbackInput.value.trim();
-  if (!t) return;
-  el.said.textContent = t;
-  el.fallbackInput.value = "";
-  await sendTextToN8n(t);
-});
-el.fallbackInput.addEventListener('keydown', (e)=>{
-  if (e.key === 'Enter') el.fallbackSend.click();
+/* ------------------- Seiten-Interaktion „primen“ ----- */
+['pointerdown','click','touchstart','touchend'].forEach(type=>{
+  document.addEventListener(type, ()=> {
+    primeAudio();
+    try { if (speechSynthesis?.paused) speechSynthesis.resume(); } catch(_){}
+  }, {passive:true});
 });
 </script>
 </body>
